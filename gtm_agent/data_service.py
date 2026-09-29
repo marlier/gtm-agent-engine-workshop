@@ -22,6 +22,7 @@ __all__ = [
 # Built prospect profiles are cached in memory (keyed by prospect_id) so repeat
 # lookups within a run are served without rebuilding.
 _PROFILES = {}
+_BILLING_QUALIFICATION_KEY = "billing_qualification"
 
 # ---------------------------------------------------------------------------
 # Public data-access functions
@@ -34,6 +35,16 @@ def get_offering(offering_id):
 def get_prospect_record(prospect_id):
     "Return the source prospect record for prospect_id, or None if not found."
     return PROSPECTS.get(prospect_id)
+
+
+def without_billing_qualification(record):
+    "Return a prospect record without billing qualification data."
+    if record is None:
+        return None
+    return {
+        key: value for key, value in record.items()
+        if key != _BILLING_QUALIFICATION_KEY
+    }
 
 
 def get_rep(rep):
@@ -63,7 +74,7 @@ def fetch_tech_stack(prospect_id):
 @traceable(run_type="tool", name="get_profile_from_db")
 def get_profile_from_db(prospect_id):
     "Look up a stored prospect profile. Returns {'prospect_profile': record|None}."
-    return {"prospect_profile": _PROFILES.get(prospect_id)}
+    return {"prospect_profile": without_billing_qualification(_PROFILES.get(prospect_id))}
 
 
 @traceable(run_type="tool", name="save_profile_to_db")
