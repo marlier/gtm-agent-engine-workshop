@@ -18,6 +18,7 @@ import json
 import os
 import random
 import uuid
+from typing import Literal
 
 from dotenv import load_dotenv
 load_dotenv(override=True)
@@ -25,7 +26,7 @@ load_dotenv(override=True)
 # Enable LangSmith tracing; project / API key come from the environment or .env.
 os.environ.setdefault("LANGSMITH_TRACING", "true")
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from langchain.tools import tool, ToolRuntime
 from langchain_openai import ChatOpenAI
 from deepagents import create_deep_agent
@@ -69,31 +70,29 @@ def build_prospect_profile(prospect_id: str) -> dict:
 
 SCORING_PROMPT = (
     "You are a GTM assistant. Score the prospect's potential for the offering from "
-    "1 to 100 based on how good a fit they are, weighing their annual revenue and "
+    "0 to 100 based on how good a fit they are, weighing their annual revenue and "
     "tech stack. In your justification, explicitly list which of the offering's required "
     "technologies the prospect has and which required technologies they are missing, naming "
-    "each one. Any missing required technology must lower the tech_stack_match component and "
-    "the overall score. Return a score and a justification that reflects your "
-    "overall assessment of this prospect's potential."
+    "each one. Return revenue_fit, segment_fit, and a justification. Do not return "
+    "tech_stack_match or an overall score."
 )
 
-from typing import Literal
+SCORE_WEIGHTS = {"revenue_fit": 0.4, "tech_stack_match": 0.3, "segment_fit": 0.3}
+
+class ProspectJudgement(BaseModel):
+    revenue_fit: float = Field(ge=0, le=100)
+    segment_fit: float = Field(ge=0, le=100)
+    justification: str
+
 
 class RubricBreakdown(BaseModel):
-    revenue_fit: float
-    tech_stack_match: float
-    segment_fit: float
+    revenue_fit: float = Field(ge=0, le=100)
+    tech_stack_match: float = Field(ge=0, le=100)
+    segment_fit: float = Field(ge=0, le=100)
     component_max: Literal[100] = 100
 
 
-class ProspectScore(BaseModel):
-    score: float
-    max_score: int = 100
-    justification: str
-    rubric_breakdown: RubricBreakdown
-
-
-_scoring_llm = ChatOpenAI(model=MODEL_NAME, temperature=0).with_structured_output(ProspectScore)
+_scoring_llm = ChatOpenAI(model=MODEL_NAME, temperature=0).with_structured_output(ProspectJudgement)
 
 
 def _offering_has_required_fields(offering):
@@ -104,7 +103,7 @@ def _offering_has_required_fields(offering):
 
 @tool
 def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
-    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
+    "Score a prospect profile using a 40/30/30 revenue, technology, and segment weighting."
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
     # Score against the prospect's saved tech stack of record.
@@ -119,7 +118,25 @@ def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict
         {"role": "system", "content": SCORING_PROMPT},
         {"role": "user", "content": user},
     ])
-    return result.model_dump()
+    judgement = ProspectJudgement.model_validate(result)
+    required_tech_stack = set(offering["required_tech_stack"])
+    prospect_tech_stack = set(prospect_profile.get("tech_stack") or [])
+    tech_stack_match = 100 * len(required_tech_stack & prospect_tech_stack) / len(required_tech_stack)
+    rubric_breakdown = RubricBreakdown(
+        revenue_fit=judgement.revenue_fit,
+        tech_stack_match=tech_stack_match,
+        segment_fit=judgement.segment_fit,
+    )
+    score = sum(
+        getattr(rubric_breakdown, component) * weight
+        for component, weight in SCORE_WEIGHTS.items()
+    )
+    return {
+        "score": score,
+        "max_score": 100,
+        "justification": judgement.justification,
+        "rubric_breakdown": rubric_breakdown.model_dump(),
+    }
 
 
 @tool
